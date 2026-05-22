@@ -145,19 +145,21 @@ def _build_rank_features(
         # Interaction features
         two_tower_score = candidate_scores.get(mid, 0.0)
         genre_overlap = float(np.dot(user_genre_pref, item_genre_vec))
+        user_has_rated_genre = 0.0
         popularity_pct = item_feats.get("popularity_pct", 0.5)
+        is_sequel = 0.0
 
         row = np.concatenate([
             user_static,           # 5
             user_genre_pref,       # 18
             item_static,           # 3
             item_genre_vec,        # 18
-            np.array([two_tower_score, genre_overlap, popularity_pct], dtype=np.float32),  # 3
+            np.array([two_tower_score, genre_overlap, user_has_rated_genre, popularity_pct, is_sequel], dtype=np.float32),  # 5
         ])
         feature_rows.append(row)
 
     if not feature_rows:
-        return np.empty((0, 47), dtype=np.float32)
+        return np.empty((0, 49), dtype=np.float32)
 
     return np.vstack(feature_rows).astype(np.float32)
 

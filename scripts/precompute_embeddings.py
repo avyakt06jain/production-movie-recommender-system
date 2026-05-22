@@ -87,7 +87,7 @@ def precompute_embeddings():
 
         item_batch = {
             "item_id": torch.tensor(
-                [item_features[iid]["movie_id"] for iid in batch_ids],
+                [iid for iid in batch_ids],
                 dtype=torch.long, device=device,
             ),
             "genre_vec": torch.tensor(
@@ -103,7 +103,7 @@ def precompute_embeddings():
                 dtype=torch.float32, device=device,
             ),
             "log_count": torch.tensor(
-                [item_features[iid]["log_count"] for iid in batch_ids],
+                [item_features[iid].get("log_count", item_features[iid].get("rating_count_log", 0.0)) for iid in batch_ids],
                 dtype=torch.float32, device=device,
             ),
         }

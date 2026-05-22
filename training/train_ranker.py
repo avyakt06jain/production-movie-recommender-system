@@ -76,8 +76,9 @@ def load_two_tower_model(model_path: str, device: str = "cpu") -> TwoTowerModel:
 
     model = TwoTowerModel(n_users, n_items, embed_dim=embed_dim)
     model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
     model.eval()
-    logger.info(f"Loaded Two-Tower model from {model_path} (epoch {checkpoint.get('epoch', '?')})")
+    logger.info(f"Loaded Two-Tower model from {model_path} (epoch {checkpoint.get('epoch', '?')}) to {device}")
     return model
 
 
@@ -117,7 +118,7 @@ def compute_two_tower_scores(
 
         # Build item tensors
         item_batch = {
-            "item_id": torch.tensor([item_features[i]["movie_id"] for i in iids], dtype=torch.long, device=device),
+            "item_id": torch.tensor([i for i in iids], dtype=torch.long, device=device),
             "genre_vec": torch.tensor(
                 np.array([item_features[i]["genre_vec"] for i in iids]),
                 dtype=torch.float32, device=device,
@@ -127,7 +128,7 @@ def compute_two_tower_scores(
                 [item_features[i].get("avg_rating_norm", item_features[i]["avg_rating"] / 5.0) for i in iids],
                 dtype=torch.float32, device=device,
             ),
-            "log_count": torch.tensor([item_features[i]["log_count"] for i in iids], dtype=torch.float32, device=device),
+            "log_count": torch.tensor([item_features[i].get("log_count", item_features[i].get("rating_count_log", 0.0)) for i in iids], dtype=torch.float32, device=device),
         }
 
         with torch.no_grad():
@@ -183,7 +184,7 @@ def build_rank_features(
 
     # Item features
     item_avg_rating = ifeat.get("avg_rating", 3.0)
-    item_log_count = ifeat["log_count"]
+    item_log_count = ifeat.get("log_count", ifeat.get("rating_count_log", 0.0))
     item_year_norm = ifeat["year_norm"]
     item_genre_vec = np.array(ifeat["genre_vec"], dtype=np.float32)
 
@@ -331,9 +332,10 @@ def train():
     features_data = load_features(CONFIG["features_path"])
 
     # ── Load Two-Tower model for score computation ─────────────────────────
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     two_tower_model = None
     if Path(CONFIG["two_tower_path"]).exists():
-        two_tower_model = load_two_tower_model(CONFIG["two_tower_path"])
+        two_tower_model = load_two_tower_model(CONFIG["two_tower_path"], device=device)
         logger.info("Two-Tower model loaded for score computation")
     else:
         logger.warning(f"Two-Tower model not found at {CONFIG['two_tower_path']}, using 0.0 for two_tower_score")

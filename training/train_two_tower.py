@@ -129,7 +129,7 @@ def compute_recall_at_k(
         dtype=torch.float32, device=device,
     )
     item_log_counts = torch.tensor(
-        [item_features[iid]["log_count"] for iid in item_ids_list],
+        [item_features[iid].get("log_count", item_features[iid].get("rating_count_log", 0.0)) for iid in item_ids_list],
         dtype=torch.float32, device=device,
     )
 
@@ -342,12 +342,11 @@ def train():
         )
 
         # ── Early stopping on Recall@20 ────────────────────────────────────
-        recall_20 = recall_metrics.get("recall@20", 0)
-        if recall_20 > best_recall_20:
-            best_recall_20 = recall_20
+        if recall_metrics["recall@20"] > best_recall_20 or epoch == 1:
+            if recall_metrics["recall@20"] > best_recall_20:
+                best_recall_20 = recall_metrics["recall@20"]
             patience_counter = 0
 
-            # Save best model
             checkpoint = {
                 "model_state_dict": model.state_dict(),
                 "n_users": n_users,
@@ -359,7 +358,7 @@ def train():
                 "recall_metrics": recall_metrics,
             }
             torch.save(checkpoint, CONFIG["model_save_path"])
-            logger.info(f"  ✓ New best model saved (Recall@20: {best_recall_20:.4f})")
+            logger.info(f"  ✓ Model saved (Recall@20: {recall_metrics['recall@20']:.4f})")
         else:
             patience_counter += 1
             logger.info(f"  No improvement ({patience_counter}/{CONFIG['patience']})")
