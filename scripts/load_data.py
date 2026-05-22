@@ -138,25 +138,40 @@ CREATE TABLE feedback_events (
 
 # ─── Download & extract ──────────────────────────────────────────────────────
 def download_and_extract():
-    """Download ml-1m.zip and extract to data/raw/ml-1m/."""
+    """Download ml-1m.zip and extract to data/raw/ml-1m/.
+
+    Falls back to synthetic data generation if download fails.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = DATA_DIR / "ml-1m.zip"
 
-    if EXTRACT_DIR.exists() and any(EXTRACT_DIR.iterdir()):
-        logger.info(f"Data already extracted at {EXTRACT_DIR}")
+    # Check if data already exists
+    if EXTRACT_DIR.exists() and (EXTRACT_DIR / "users.dat").exists():
+        logger.info(f"Data already exists at {EXTRACT_DIR}")
         return
 
+    # Try downloading
     if not zip_path.exists():
-        logger.info(f"Downloading MovieLens 1M from {MOVIELENS_URL} ...")
-        urllib.request.urlretrieve(MOVIELENS_URL, str(zip_path))
-        logger.info(f"Downloaded to {zip_path} ({zip_path.stat().st_size / 1e6:.1f} MB)")
-    else:
-        logger.info(f"Zip file already exists at {zip_path}")
+        try:
+            logger.info(f"Downloading MovieLens 1M from {MOVIELENS_URL} ...")
+            urllib.request.urlretrieve(MOVIELENS_URL, str(zip_path))
+            logger.info(f"Downloaded to {zip_path} ({zip_path.stat().st_size / 1e6:.1f} MB)")
+        except Exception as e:
+            logger.warning(f"Download failed: {e}")
+            logger.info("Falling back to synthetic data generation ...")
+            from scripts.generate_synthetic_data import main as generate_main
+            generate_main()
+            return
 
-    logger.info("Extracting ...")
-    with zipfile.ZipFile(str(zip_path), "r") as zf:
-        zf.extractall(str(DATA_DIR))
-    logger.info(f"Extracted to {EXTRACT_DIR}")
+    if zip_path.exists():
+        logger.info("Extracting ...")
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            zf.extractall(str(DATA_DIR))
+        logger.info(f"Extracted to {EXTRACT_DIR}")
+    else:
+        logger.info("No zip file found, generating synthetic data ...")
+        from scripts.generate_synthetic_data import main as generate_main
+        generate_main()
 
 
 # ─── Parse raw .dat files ────────────────────────────────────────────────────

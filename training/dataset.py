@@ -137,14 +137,23 @@ def _make_user_tensors(user_feat: dict) -> dict[str, torch.Tensor]:
     }
 
 
-def _make_item_tensors(item_feat: dict) -> dict[str, torch.Tensor]:
-    """Convert an item feature dict to a dict of tensors (un-batched, no batch dim)."""
+def _make_item_tensors(item_feat: dict, item_id: int = 0) -> dict[str, torch.Tensor]:
+    """Convert an item feature dict to a dict of tensors (un-batched, no batch dim).
+
+    Args:
+        item_feat: Item feature dict from features.pkl
+        item_id: The movie_id (passed separately since it's the dict key, not a value)
+    """
+    # movie_id may or may not be in the dict — use the explicit param as fallback
+    mid = item_feat.get("movie_id", item_id)
+    avg_rating = float(item_feat.get("avg_rating", 0.0) or 0.0)
+    log_count = float(item_feat.get("log_count", item_feat.get("rating_count_log", 0.0)))
     return {
-        "item_id": torch.tensor(item_feat["movie_id"], dtype=torch.long),
+        "item_id": torch.tensor(mid, dtype=torch.long),
         "genre_vec": torch.tensor(item_feat["genre_vec"], dtype=torch.float32),
-        "year_norm": torch.tensor(item_feat["year_norm"], dtype=torch.float32),
-        "avg_rating_norm": torch.tensor(item_feat.get("avg_rating_norm", item_feat["avg_rating"] / 5.0), dtype=torch.float32),
-        "log_count": torch.tensor(item_feat["log_count"], dtype=torch.float32),
+        "year_norm": torch.tensor(float(item_feat["year_norm"]), dtype=torch.float32),
+        "avg_rating_norm": torch.tensor(item_feat.get("avg_rating_norm", avg_rating / 5.0), dtype=torch.float32),
+        "log_count": torch.tensor(log_count, dtype=torch.float32),
     }
 
 
@@ -221,8 +230,8 @@ class MovieLensDataset(Dataset):
             neg_item_id = random.choice(self.all_item_ids)
 
         user_tensors = _make_user_tensors(self.user_features[user_id])
-        pos_tensors = _make_item_tensors(self.item_features[pos_item_id])
-        neg_tensors = _make_item_tensors(self.item_features[neg_item_id])
+        pos_tensors = _make_item_tensors(self.item_features[pos_item_id], item_id=pos_item_id)
+        neg_tensors = _make_item_tensors(self.item_features[neg_item_id], item_id=neg_item_id)
 
         return user_tensors, pos_tensors, neg_tensors
 
