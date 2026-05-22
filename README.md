@@ -1,7 +1,5 @@
 # MovieRec: Production-Grade Recommender System
 
-![MovieRec Cover](https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=2025&auto=format&fit=crop)
-
 A full-stack, production-ready machine learning recommendation system built to serve personalized movie suggestions. It leverages a **3-stage ranking funnel** (Candidate Generation → Ranking → Re-ranking) typically used by enterprise systems like YouTube and Netflix, prioritizing high relevance, diversity, and sub-100ms latency.
 
 ---
