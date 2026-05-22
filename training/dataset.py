@@ -105,13 +105,35 @@ def _encode_gender(gender: str) -> int:
 
 
 def _make_user_tensors(user_feat: dict) -> dict[str, torch.Tensor]:
-    """Convert a user feature dict to a dict of tensors (un-batched, no batch dim)."""
+    """Convert a user feature dict to a dict of tensors (un-batched, no batch dim).
+
+    Handles both raw format (age as MovieLens code, gender as 'M'/'F')
+    and pre-encoded format (age_bucket as int, gender as int).
+    """
+    # Handle age: may be raw MovieLens code or pre-encoded bucket
+    age_val = user_feat.get("age", user_feat.get("age_bucket", 0))
+    if age_val in AGE_BUCKET_MAP:
+        age_bucket = _encode_age_bucket(age_val)
+    else:
+        age_bucket = int(age_val)
+
+    # Handle gender: may be 'M'/'F' string or pre-encoded int
+    gender_val = user_feat.get("gender_raw", user_feat.get("gender", 0))
+    if isinstance(gender_val, str):
+        gender_enc = _encode_gender(gender_val)
+    else:
+        # Pre-encoded: 0=F, 1=M → shift to match embedding (0=pad, 1=F, 2=M)
+        gender_enc = int(gender_val) + 1
+
+    # Handle watched_genre_vec
+    genre_vec = user_feat.get("watched_genre_vec", user_feat.get("genre_pref_vec", np.zeros(N_GENRES)))
+
     return {
-        "user_id": torch.tensor(user_feat["user_id"], dtype=torch.long),
-        "age_bucket": torch.tensor(_encode_age_bucket(user_feat["age"]), dtype=torch.long),
-        "gender": torch.tensor(_encode_gender(user_feat["gender"]), dtype=torch.long),
+        "user_id": torch.tensor(user_feat.get("user_id", 0), dtype=torch.long),
+        "age_bucket": torch.tensor(age_bucket, dtype=torch.long),
+        "gender": torch.tensor(gender_enc, dtype=torch.long),
         "occupation": torch.tensor(user_feat["occupation"], dtype=torch.long),
-        "watched_genre_vec": torch.tensor(user_feat["watched_genre_vec"], dtype=torch.float32),
+        "watched_genre_vec": torch.tensor(genre_vec, dtype=torch.float32),
     }
 
 

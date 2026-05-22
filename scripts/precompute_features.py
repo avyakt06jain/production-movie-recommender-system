@@ -39,34 +39,52 @@ from features.feature_store import (
 # Data loading helpers (sync via psycopg2)
 # ---------------------------------------------------------------------------
 def load_all_data(conn) -> tuple[list, list, list]:
-    """Load users, movies, and ratings from PostgreSQL.
+    """Load users, movies, and ratings from the database.
+
+    Handles both PostgreSQL (genres as TEXT[]) and SQLite (genres as pipe-separated string).
 
     Returns
     -------
     users : list[tuple]
         Each tuple is (user_id, gender, age, occupation, zip_code).
     movies : list[tuple]
-        Each tuple is (movie_id, title, year, genres, avg_rating, rating_count).
+        Each tuple is (movie_id, title, year, genres_list, avg_rating, rating_count).
     ratings : list[tuple]
         Each tuple is (user_id, movie_id, rating, timestamp).
     """
-    with conn.cursor() as cur:
-        cur.execute("SELECT user_id, gender, age, occupation, zip_code FROM users ORDER BY user_id")
-        users = cur.fetchall()
-        logger.info(f"  Loaded {len(users):,} users from DB.")
+    from api.database import is_sqlite
+    use_sqlite = is_sqlite(conn)
 
-        cur.execute(
-            "SELECT movie_id, title, year, genres, avg_rating, rating_count "
-            "FROM movies ORDER BY movie_id"
-        )
-        movies = cur.fetchall()
-        logger.info(f"  Loaded {len(movies):,} movies from DB.")
+    cur = conn.cursor()
 
-        cur.execute(
-            "SELECT user_id, movie_id, rating, timestamp FROM ratings ORDER BY user_id, timestamp"
-        )
-        ratings = cur.fetchall()
-        logger.info(f"  Loaded {len(ratings):,} ratings from DB.")
+    cur.execute("SELECT user_id, gender, age, occupation, zip_code FROM users ORDER BY user_id")
+    users = [tuple(row) for row in cur.fetchall()]
+    logger.info(f"  Loaded {len(users):,} users from DB.")
+
+    cur.execute(
+        "SELECT movie_id, title, year, genres, avg_rating, rating_count "
+        "FROM movies ORDER BY movie_id"
+    )
+    raw_movies = cur.fetchall()
+    movies = []
+    for row in raw_movies:
+        row = tuple(row)
+        movie_id, title, year, genres_raw, avg_rating, rating_count = row
+        # Handle genres: SQLite stores as pipe-separated string, PostgreSQL as array
+        if isinstance(genres_raw, str):
+            genres_list = genres_raw.split("|") if genres_raw else []
+        elif isinstance(genres_raw, list):
+            genres_list = genres_raw
+        else:
+            genres_list = []
+        movies.append((movie_id, title, year, genres_list, avg_rating, rating_count))
+    logger.info(f"  Loaded {len(movies):,} movies from DB.")
+
+    cur.execute(
+        "SELECT user_id, movie_id, rating, timestamp FROM ratings ORDER BY user_id, timestamp"
+    )
+    ratings = [tuple(row) for row in cur.fetchall()]
+    logger.info(f"  Loaded {len(ratings):,} ratings from DB.")
 
     return users, movies, ratings
 
@@ -193,11 +211,15 @@ def compute_user_features(
         gender_enc = GENDER_MAP.get(gender, 0)
 
         user_features[user_id] = {
+            "user_id": user_id,
             "genre_pref_vec": genre_pref_vec,
+            "watched_genre_vec": genre_pref_vec,  # alias for dataset.py compatibility
             "avg_rating": avg_rating,
             "rating_count": rating_count,
             "age_bucket": age_bucket,
+            "age": age,              # raw MovieLens age code — needed by dataset.py
             "gender": gender_enc,
+            "gender_raw": gender,    # raw string — needed by dataset.py
             "occupation": occupation,
             "rated_movie_ids": rated_movie_ids,
             "rating_timestamps": rating_timestamps,
@@ -239,10 +261,44 @@ def main() -> None:
     user_feats = compute_user_features(users, ratings, item_feats)
     logger.info(f"  Computed features for {len(user_feats):,} users.")
 
+    # Build training data structures needed by dataset.py
+    logger.info("Building training data structures ...")
+    import pandas as pd
+
+    # user_positive_items: user_id -> list of movie_ids rated >= 4.0
+    user_positive_items: dict[int, list[int]] = {}
+    # user_all_items: user_id -> set of all rated movie_ids
+    user_all_items: dict[int, set[int]] = {}
+
+    for uid, uf in user_feats.items():
+        user_all_items[uid] = set(uf.get("rated_movie_ids", []))
+
+    # Build from raw ratings for accuracy
+    from collections import defaultdict as _defaultdict
+    _user_pos = _defaultdict(list)
+    for user_id, movie_id, rating, timestamp in ratings:
+        if rating >= 4.0 and movie_id in item_feats:
+            _user_pos[user_id].append(movie_id)
+    user_positive_items = dict(_user_pos)
+
+    all_item_ids = sorted(item_feats.keys())
+
+    # Build ratings DataFrame for time-based splitting
+    ratings_df = pd.DataFrame(ratings, columns=["user_id", "movie_id", "rating", "timestamp"])
+
+    logger.info(f"  user_positive_items: {len(user_positive_items):,} users with positive items")
+    logger.info(f"  all_item_ids: {len(all_item_ids):,} items")
+
     # Build and save FeatureStore
     fs = FeatureStore()
     fs.user_features = user_feats
     fs.item_features = item_feats
+    fs.training_data = {
+        "user_positive_items": user_positive_items,
+        "user_all_items": user_all_items,
+        "all_item_ids": all_item_ids,
+        "ratings_df": ratings_df,
+    }
 
     output_path = str(PROJECT_ROOT / "artifacts" / "features.pkl")
     logger.info(f"Saving feature store to {output_path} ...")

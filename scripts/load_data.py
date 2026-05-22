@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-MovieLens 1M Data Loading Script
-=================================
-Downloads ml-1m.zip, parses .dat files, creates PostgreSQL tables, and
-bulk-inserts all data.
+Data Loading Script
+====================
+Downloads MovieLens 1M, parses the raw files, and bulk-loads into the database.
+Supports both PostgreSQL (production) and SQLite (local development).
 
 Run from the project root:
     python scripts/load_data.py
@@ -12,41 +12,37 @@ Run from the project root:
 import os
 import re
 import sys
+import urllib.request
 import zipfile
-from collections import defaultdict
 from pathlib import Path
-from urllib.request import urlretrieve
 
-from dotenv import load_dotenv
+import numpy as np
 from loguru import logger
 
-# Ensure project root is on sys.path so we can import api.database
+# Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+from api.database import get_sync_connection, is_sqlite
+
+
+# ─── Constants ────────────────────────────────────────────────────────────────
 MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
-ZIP_PATH = DATA_DIR / "ml-1m.zip"
 EXTRACT_DIR = DATA_DIR / "ml-1m"
 
-YEAR_RE = re.compile(r"\((\d{4})\)\s*$")
 
-# ---------------------------------------------------------------------------
-# SQL Schema (exactly per spec section 4.1)
-# ---------------------------------------------------------------------------
-DROP_TABLES_SQL = """
+# ─── SQL Schema ──────────────────────────────────────────────────────────────
+
+POSTGRES_SCHEMA = """
 DROP TABLE IF EXISTS feedback_events CASCADE;
 DROP TABLE IF EXISTS ratings CASCADE;
 DROP TABLE IF EXISTS movies CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
-"""
 
-CREATE_USERS_SQL = """
 CREATE TABLE users (
     user_id     INTEGER PRIMARY KEY,
     gender      CHAR(1),
@@ -55,9 +51,7 @@ CREATE TABLE users (
     zip_code    VARCHAR(10),
     created_at  TIMESTAMP DEFAULT NOW()
 );
-"""
 
-CREATE_MOVIES_SQL = """
 CREATE TABLE movies (
     movie_id    INTEGER PRIMARY KEY,
     title       VARCHAR(255) NOT NULL,
@@ -67,9 +61,7 @@ CREATE TABLE movies (
     rating_count INTEGER,
     created_at  TIMESTAMP DEFAULT NOW()
 );
-"""
 
-CREATE_RATINGS_SQL = """
 CREATE TABLE ratings (
     rating_id   SERIAL PRIMARY KEY,
     user_id     INTEGER REFERENCES users(user_id),
@@ -80,12 +72,10 @@ CREATE TABLE ratings (
     created_at  TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_ratings_user     ON ratings(user_id);
-CREATE INDEX idx_ratings_movie    ON ratings(movie_id);
+CREATE INDEX idx_ratings_user    ON ratings(user_id);
+CREATE INDEX idx_ratings_movie   ON ratings(movie_id);
 CREATE INDEX idx_ratings_implicit ON ratings(user_id, implicit);
-"""
 
-CREATE_FEEDBACK_SQL = """
 CREATE TABLE feedback_events (
     event_id    SERIAL PRIMARY KEY,
     user_id     INTEGER REFERENCES users(user_id),
@@ -97,261 +87,275 @@ CREATE TABLE feedback_events (
 );
 """
 
+SQLITE_SCHEMA = """
+DROP TABLE IF EXISTS feedback_events;
+DROP TABLE IF EXISTS ratings;
+DROP TABLE IF EXISTS movies;
+DROP TABLE IF EXISTS users;
 
-# ---------------------------------------------------------------------------
-# Download & Extract
-# ---------------------------------------------------------------------------
-def download_dataset() -> None:
-    """Download ml-1m.zip if not already present."""
+CREATE TABLE users (
+    user_id     INTEGER PRIMARY KEY,
+    gender      TEXT,
+    age         INTEGER,
+    occupation  INTEGER,
+    zip_code    TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE movies (
+    movie_id    INTEGER PRIMARY KEY,
+    title       TEXT NOT NULL,
+    year        INTEGER,
+    genres      TEXT,
+    avg_rating  REAL,
+    rating_count INTEGER,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE ratings (
+    rating_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER REFERENCES users(user_id),
+    movie_id    INTEGER REFERENCES movies(movie_id),
+    rating      REAL NOT NULL,
+    timestamp   INTEGER,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_ratings_user    ON ratings(user_id);
+CREATE INDEX idx_ratings_movie   ON ratings(movie_id);
+
+CREATE TABLE feedback_events (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER REFERENCES users(user_id),
+    movie_id    INTEGER REFERENCES movies(movie_id),
+    event_type  TEXT,
+    rating      REAL,
+    session_id  TEXT,
+    timestamp   TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+# ─── Download & extract ──────────────────────────────────────────────────────
+def download_and_extract():
+    """Download ml-1m.zip and extract to data/raw/ml-1m/."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if ZIP_PATH.exists():
-        logger.info(f"Dataset zip already exists at {ZIP_PATH}")
-        return
+    zip_path = DATA_DIR / "ml-1m.zip"
 
-    logger.info(f"Downloading MovieLens 1M from {MOVIELENS_URL} ...")
-
-    def _progress(block_num: int, block_size: int, total_size: int) -> None:
-        downloaded = block_num * block_size
-        pct = min(100.0, downloaded / total_size * 100) if total_size > 0 else 0
-        print(f"\r  Progress: {pct:.1f}% ({downloaded:,} / {total_size:,} bytes)", end="", flush=True)
-
-    urlretrieve(MOVIELENS_URL, str(ZIP_PATH), reporthook=_progress)
-    print()  # newline after progress bar
-    logger.info("Download complete.")
-
-
-def extract_dataset() -> None:
-    """Unzip ml-1m.zip into data/raw/ml-1m/."""
-    if EXTRACT_DIR.exists() and (EXTRACT_DIR / "users.dat").exists():
+    if EXTRACT_DIR.exists() and any(EXTRACT_DIR.iterdir()):
         logger.info(f"Data already extracted at {EXTRACT_DIR}")
         return
 
-    logger.info(f"Extracting {ZIP_PATH} → {DATA_DIR} ...")
-    with zipfile.ZipFile(ZIP_PATH, "r") as zf:
+    if not zip_path.exists():
+        logger.info(f"Downloading MovieLens 1M from {MOVIELENS_URL} ...")
+        urllib.request.urlretrieve(MOVIELENS_URL, str(zip_path))
+        logger.info(f"Downloaded to {zip_path} ({zip_path.stat().st_size / 1e6:.1f} MB)")
+    else:
+        logger.info(f"Zip file already exists at {zip_path}")
+
+    logger.info("Extracting ...")
+    with zipfile.ZipFile(str(zip_path), "r") as zf:
         zf.extractall(str(DATA_DIR))
-    logger.info("Extraction complete.")
+    logger.info(f"Extracted to {EXTRACT_DIR}")
 
 
-# ---------------------------------------------------------------------------
-# Parsing functions
-# ---------------------------------------------------------------------------
-def parse_users(filepath: Path) -> list[tuple]:
+# ─── Parse raw .dat files ────────────────────────────────────────────────────
+def parse_users():
     """Parse users.dat → list of (user_id, gender, age, occupation, zip_code)."""
-    rows = []
-    with open(filepath, "r", encoding="latin-1") as f:
+    users = []
+    path = EXTRACT_DIR / "users.dat"
+    with open(path, "r", encoding="latin-1") as f:
         for line in f:
             parts = line.strip().split("::")
-            if len(parts) < 5:
-                continue
-            user_id = int(parts[0])
-            gender = parts[1]
-            age = int(parts[2])
-            occupation = int(parts[3])
-            zip_code = parts[4]
-            rows.append((user_id, gender, age, occupation, zip_code))
-    return rows
+            users.append((int(parts[0]), parts[1], int(parts[2]), int(parts[3]), parts[4]))
+    logger.info(f"Parsed {len(users):,} users from users.dat")
+    return users
 
 
-def parse_movies(filepath: Path) -> list[tuple]:
-    """Parse movies.dat → list of (movie_id, title, year, genres_list).
-
-    Year is extracted from the title with regex ``\\((\\d{4})\\)``.
-    Genres are split on ``|`` into a Python list.
-    """
-    rows = []
-    with open(filepath, "r", encoding="latin-1") as f:
+def parse_movies():
+    """Parse movies.dat → list of (movie_id, title, year, genres_list)."""
+    movies = []
+    year_re = re.compile(r"\((\d{4})\)\s*$")
+    path = EXTRACT_DIR / "movies.dat"
+    with open(path, "r", encoding="latin-1") as f:
         for line in f:
             parts = line.strip().split("::")
-            if len(parts) < 3:
-                continue
             movie_id = int(parts[0])
             title = parts[1].strip()
-            genres_str = parts[2].strip()
+            genres = parts[2].strip().split("|")
 
             # Extract year from title
-            m = YEAR_RE.search(title)
-            year = int(m.group(1)) if m else None
+            match = year_re.search(title)
+            year = int(match.group(1)) if match else None
 
-            # Split genres
-            genres = genres_str.split("|") if genres_str else []
-
-            rows.append((movie_id, title, year, genres))
-    return rows
+            movies.append((movie_id, title, year, genres))
+    logger.info(f"Parsed {len(movies):,} movies from movies.dat")
+    return movies
 
 
-def parse_ratings(filepath: Path) -> list[tuple]:
+def parse_ratings():
     """Parse ratings.dat → list of (user_id, movie_id, rating, timestamp)."""
-    rows = []
-    with open(filepath, "r", encoding="latin-1") as f:
+    ratings = []
+    path = EXTRACT_DIR / "ratings.dat"
+    with open(path, "r", encoding="latin-1") as f:
         for line in f:
             parts = line.strip().split("::")
-            if len(parts) < 4:
-                continue
-            user_id = int(parts[0])
-            movie_id = int(parts[1])
-            rating = float(parts[2])
-            timestamp = int(parts[3])
-            rows.append((user_id, movie_id, rating, timestamp))
-    return rows
+            ratings.append((
+                int(parts[0]),      # user_id
+                int(parts[1]),      # movie_id
+                float(parts[2]),    # rating
+                int(parts[3]),      # timestamp
+            ))
+    logger.info(f"Parsed {len(ratings):,} ratings from ratings.dat")
+    return ratings
 
 
-# ---------------------------------------------------------------------------
-# Compute movie aggregate stats
-# ---------------------------------------------------------------------------
-def compute_movie_stats(ratings_rows: list[tuple]) -> dict[int, tuple[float, int]]:
-    """Compute avg_rating and rating_count per movie_id.
+# ─── Compute aggregate movie stats ───────────────────────────────────────────
+def compute_movie_stats(ratings, movies):
+    """Compute avg_rating and rating_count per movie.
 
-    Returns {movie_id: (avg_rating, rating_count)}.
+    Returns: dict[movie_id] → (avg_rating, rating_count)
     """
-    sums: dict[int, float] = defaultdict(float)
-    counts: dict[int, int] = defaultdict(int)
-    for _, movie_id, rating, _ in ratings_rows:
-        sums[movie_id] += rating
-        counts[movie_id] += 1
-    return {
-        mid: (sums[mid] / counts[mid], counts[mid])
-        for mid in counts
-    }
+    from collections import defaultdict
+    movie_ratings = defaultdict(list)
+    for _, movie_id, rating, _ in ratings:
+        movie_ratings[movie_id].append(rating)
+
+    stats = {}
+    for movie_id, _, _, _ in movies:
+        r_list = movie_ratings.get(movie_id, [])
+        if r_list:
+            stats[movie_id] = (float(np.mean(r_list)), len(r_list))
+        else:
+            stats[movie_id] = (0.0, 0)
+    return stats
 
 
-# ---------------------------------------------------------------------------
-# Database operations
-# ---------------------------------------------------------------------------
-def create_tables(conn) -> None:
-    """Drop existing tables and recreate them from scratch."""
-    with conn.cursor() as cur:
-        logger.info("Dropping existing tables (if any) ...")
-        cur.execute(DROP_TABLES_SQL)
+# ─── Bulk insert ──────────────────────────────────────────────────────────────
+def load_into_db(conn, users, movies, ratings, movie_stats, use_sqlite: bool):
+    """Create tables and bulk-insert all data."""
 
-        logger.info("Creating users table ...")
-        cur.execute(CREATE_USERS_SQL)
+    cur = conn.cursor()
 
-        logger.info("Creating movies table ...")
-        cur.execute(CREATE_MOVIES_SQL)
-
-        logger.info("Creating ratings table ...")
-        cur.execute(CREATE_RATINGS_SQL)
-
-        logger.info("Creating feedback_events table ...")
-        cur.execute(CREATE_FEEDBACK_SQL)
-
+    # Create schema
+    logger.info("Creating tables ...")
+    schema = SQLITE_SCHEMA if use_sqlite else POSTGRES_SCHEMA
+    for statement in schema.split(";"):
+        statement = statement.strip()
+        if statement:
+            cur.execute(statement)
     conn.commit()
-    logger.info("All tables created successfully.")
 
-
-def bulk_insert_users(conn, users: list[tuple]) -> None:
-    """Bulk-insert user rows using execute_values."""
-    from psycopg2.extras import execute_values
-
-    sql = "INSERT INTO users (user_id, gender, age, occupation, zip_code) VALUES %s"
-    with conn.cursor() as cur:
-        execute_values(cur, sql, users, page_size=2000)
-    conn.commit()
-    logger.info(f"Inserted {len(users):,} users.")
-
-
-def bulk_insert_movies(conn, movies: list[tuple], stats: dict[int, tuple[float, int]]) -> None:
-    """Bulk-insert movie rows (with avg_rating and rating_count) using execute_values."""
-    from psycopg2.extras import execute_values
-
-    # Build rows with stats
-    rows = []
-    for movie_id, title, year, genres in movies:
-        avg_rating, rating_count = stats.get(movie_id, (None, 0))
-        rows.append((movie_id, title, year, genres, avg_rating, rating_count))
-
-    sql = "INSERT INTO movies (movie_id, title, year, genres, avg_rating, rating_count) VALUES %s"
-
-    with conn.cursor() as cur:
+    # Insert users
+    logger.info("Inserting users ...")
+    if use_sqlite:
+        cur.executemany(
+            "INSERT INTO users (user_id, gender, age, occupation, zip_code) VALUES (?, ?, ?, ?, ?)",
+            users
+        )
+    else:
+        from psycopg2.extras import execute_values
         execute_values(
             cur,
-            sql,
-            rows,
-            template="(%s, %s, %s, %s::TEXT[], %s, %s)",
-            page_size=2000,
+            "INSERT INTO users (user_id, gender, age, occupation, zip_code) VALUES %s",
+            users,
+            page_size=5000,
         )
     conn.commit()
-    logger.info(f"Inserted {len(rows):,} movies.")
+    logger.info(f"  Inserted {len(users):,} users")
 
+    # Insert movies (with avg_rating and rating_count)
+    logger.info("Inserting movies ...")
+    movie_rows = []
+    for movie_id, title, year, genres in movies:
+        avg_r, count = movie_stats.get(movie_id, (0.0, 0))
+        if use_sqlite:
+            # SQLite: store genres as pipe-separated string
+            movie_rows.append((movie_id, title, year, "|".join(genres), avg_r, count))
+        else:
+            # PostgreSQL: store as TEXT array
+            movie_rows.append((movie_id, title, year, genres, avg_r, count))
 
-def bulk_insert_ratings(conn, ratings: list[tuple]) -> None:
-    """Bulk-insert rating rows using execute_values (batched for large datasets)."""
-    from psycopg2.extras import execute_values
-
-    sql = "INSERT INTO ratings (user_id, movie_id, rating, timestamp) VALUES %s"
-    batch_size = 50_000
-
-    with conn.cursor() as cur:
-        for i in range(0, len(ratings), batch_size):
-            batch = ratings[i : i + batch_size]
-            execute_values(cur, sql, batch, page_size=5000)
-            logger.debug(f"  Inserted ratings batch {i:,} – {i + len(batch):,}")
+    if use_sqlite:
+        cur.executemany(
+            "INSERT INTO movies (movie_id, title, year, genres, avg_rating, rating_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            movie_rows,
+        )
+    else:
+        from psycopg2.extras import execute_values
+        execute_values(
+            cur,
+            "INSERT INTO movies (movie_id, title, year, genres, avg_rating, rating_count) VALUES %s",
+            movie_rows,
+            page_size=5000,
+        )
     conn.commit()
-    logger.info(f"Inserted {len(ratings):,} ratings.")
+    logger.info(f"  Inserted {len(movie_rows):,} movies")
+
+    # Insert ratings (in batches)
+    logger.info("Inserting ratings ...")
+    batch_size = 50000
+    for i in range(0, len(ratings), batch_size):
+        batch = ratings[i : i + batch_size]
+        if use_sqlite:
+            cur.executemany(
+                "INSERT INTO ratings (user_id, movie_id, rating, timestamp) VALUES (?, ?, ?, ?)",
+                batch,
+            )
+        else:
+            from psycopg2.extras import execute_values
+            execute_values(
+                cur,
+                "INSERT INTO ratings (user_id, movie_id, rating, timestamp) VALUES %s",
+                batch,
+                page_size=5000,
+            )
+        conn.commit()
+        logger.info(f"  Inserted batch {i // batch_size + 1}: {len(batch):,} ratings")
+
+    logger.info(f"  Total ratings inserted: {len(ratings):,}")
 
 
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
-def verify_counts(conn) -> None:
-    """Log row counts for all tables."""
-    with conn.cursor() as cur:
-        for table in ("users", "movies", "ratings", "feedback_events"):
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
-            count = cur.fetchone()[0]
-            logger.info(f"  {table}: {count:,} rows")
+# ─── Verify ──────────────────────────────────────────────────────────────────
+def verify(conn, use_sqlite: bool):
+    """Verify row counts."""
+    cur = conn.cursor()
+    for table in ["users", "movies", "ratings", "feedback_events"]:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cur.fetchone()[0]
+        logger.info(f"  {table}: {count:,} rows")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main() -> None:
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
     logger.info("=" * 60)
     logger.info("MovieLens 1M Data Loading Script")
     logger.info("=" * 60)
 
-    # 1. Download & extract
-    download_dataset()
-    extract_dataset()
+    # Step 1: Download & extract
+    download_and_extract()
 
-    # 2. Parse data files
-    logger.info("Parsing users.dat ...")
-    users = parse_users(EXTRACT_DIR / "users.dat")
-    logger.info(f"  Parsed {len(users):,} users.")
+    # Step 2: Parse raw files
+    users = parse_users()
+    movies = parse_movies()
+    ratings = parse_ratings()
 
-    logger.info("Parsing movies.dat ...")
-    movies = parse_movies(EXTRACT_DIR / "movies.dat")
-    logger.info(f"  Parsed {len(movies):,} movies.")
+    # Step 3: Compute movie stats
+    movie_stats = compute_movie_stats(ratings, movies)
 
-    logger.info("Parsing ratings.dat ...")
-    ratings = parse_ratings(EXTRACT_DIR / "ratings.dat")
-    logger.info(f"  Parsed {len(ratings):,} ratings.")
-
-    # 3. Compute movie stats
-    logger.info("Computing per-movie avg_rating and rating_count ...")
-    movie_stats = compute_movie_stats(ratings)
-    logger.info(f"  Stats computed for {len(movie_stats):,} movies.")
-
-    # 4. Connect to PostgreSQL and load
-    from api.database import get_sync_connection
-
-    logger.info("Connecting to PostgreSQL ...")
+    # Step 4: Connect and load
     conn = get_sync_connection()
+    use_sqlite = is_sqlite(conn)
+    backend = "SQLite" if use_sqlite else "PostgreSQL"
+    logger.info(f"Using database backend: {backend}")
+
     try:
-        create_tables(conn)
+        load_into_db(conn, users, movies, ratings, movie_stats, use_sqlite)
 
-        logger.info("Bulk inserting users ...")
-        bulk_insert_users(conn, users)
-
-        logger.info("Bulk inserting movies ...")
-        bulk_insert_movies(conn, movies, movie_stats)
-
-        logger.info("Bulk inserting ratings ...")
-        bulk_insert_ratings(conn, ratings)
-
-        logger.info("-" * 40)
-        logger.info("Verifying row counts:")
-        verify_counts(conn)
+        # Step 5: Verify
+        logger.info("Verifying row counts ...")
+        verify(conn, use_sqlite)
     finally:
         conn.close()
 

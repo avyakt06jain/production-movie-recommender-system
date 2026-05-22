@@ -79,17 +79,20 @@ class FeatureStore:
     def __init__(self) -> None:
         self.user_features: dict[int, dict[str, Any]] = {}
         self.item_features: dict[int, dict[str, Any]] = {}
+        # Training data — populated by precompute_features.py, used by dataset.py
+        self.training_data: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
     def save(self, path: str = DEFAULT_FEATURES_PATH) -> None:
-        """Serialize both feature dicts to a pickle file."""
+        """Serialize feature dicts and training data to a pickle file."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "user_features": self.user_features,
             "item_features": self.item_features,
         }
+        payload.update(self.training_data)
         with open(path, "wb") as f:
             pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -99,6 +102,11 @@ class FeatureStore:
             payload = pickle.load(f)
         self.user_features = payload["user_features"]
         self.item_features = payload["item_features"]
+        # Restore training data keys if present
+        self.training_data = {
+            k: v for k, v in payload.items()
+            if k not in ("user_features", "item_features")
+        }
 
     # ------------------------------------------------------------------
     # Two-Tower model helpers
@@ -108,10 +116,12 @@ class FeatureStore:
 
         Returns a dict with keys:
         - ``user_id``: int
-        - ``age_bucket``: int (0–6)
-        - ``gender``: int (0 or 1)
+        - ``age_bucket``: int (0–7, mapped for embedding)
+        - ``gender``: int (0=pad, 1=F, 2=M for embedding)
         - ``occupation``: int (0–20)
         - ``watched_genre_vec``: np.ndarray of shape ``(18,)``
+        - ``genre_pref_vec``: np.ndarray (alias)
+        - ``avg_rating``, ``rating_count``, ``rated_movie_ids``, etc.
         """
         uf = self.user_features.get(user_id)
         if uf is None:
@@ -122,40 +132,70 @@ class FeatureStore:
                 "gender": 0,
                 "occupation": 0,
                 "watched_genre_vec": np.zeros(NUM_GENRES, dtype=np.float32),
+                "genre_pref_vec": np.zeros(NUM_GENRES, dtype=np.float32),
+                "avg_rating": 3.0,
+                "rating_count": 0,
+                "rated_movie_ids": [],
             }
+        genre_pref = np.asarray(uf.get("genre_pref_vec", np.zeros(NUM_GENRES)), dtype=np.float32)
+        # Gender: stored as 0=F, 1=M; embedding expects 0=pad, 1=F, 2=M
+        gender_enc = int(uf.get("gender", 0)) + 1
         return {
             "user_id": user_id,
-            "age_bucket": int(uf["age_bucket"]),
-            "gender": int(uf["gender"]),
-            "occupation": int(uf["occupation"]),
-            "watched_genre_vec": np.asarray(uf["genre_pref_vec"], dtype=np.float32),
+            "age_bucket": int(uf.get("age_bucket", 0)),
+            "gender": gender_enc,
+            "occupation": int(uf.get("occupation", 0)),
+            "watched_genre_vec": genre_pref,
+            "genre_pref_vec": genre_pref,
+            "avg_rating": float(uf.get("avg_rating", 3.0)),
+            "rating_count": int(uf.get("rating_count", 0)),
+            "rated_movie_ids": uf.get("rated_movie_ids", []),
+            "age_norm": self._age_bucket_to_norm(int(uf.get("age_bucket", 0))),
+            "gender_enc": int(uf.get("gender", 0)),  # raw 0/1 for ranking features
         }
 
     def get_item_features(self, movie_id: int) -> dict[str, Any]:
         """Return item features as a dict of values ready for the ItemTower.
 
         Returns a dict with keys:
-        - ``item_id``: int
+        - ``item_id`` / ``movie_id``: int
         - ``genre_vec``: np.ndarray of shape ``(18,)``
         - ``year_norm``: float
         - ``avg_rating_norm``: float (rating / 5.0)
-        - ``log_count``: float (log1p of rating_count)
+        - ``log_count`` / ``rating_count_log``: float (log1p of rating_count)
+        - ``title``, ``genres``, ``avg_rating``, ``rating_count``, ``popularity_pct``
         """
         itf = self.item_features.get(movie_id)
         if itf is None:
             return {
                 "item_id": movie_id,
+                "movie_id": movie_id,
                 "genre_vec": np.zeros(NUM_GENRES, dtype=np.float32),
                 "year_norm": 0.0,
                 "avg_rating_norm": 0.0,
                 "log_count": 0.0,
+                "rating_count_log": 0.0,
+                "title": f"Movie {movie_id}",
+                "genres": [],
+                "avg_rating": 0.0,
+                "rating_count": 0,
+                "popularity_pct": 0.0,
             }
+        avg_rating = float(itf.get("avg_rating", 0.0) or 0.0)
+        log_count = float(itf.get("rating_count_log", 0.0))
         return {
             "item_id": movie_id,
+            "movie_id": movie_id,
             "genre_vec": np.asarray(itf["genre_vec"], dtype=np.float32),
             "year_norm": float(itf["year_norm"]),
-            "avg_rating_norm": float(itf["avg_rating"]) / 5.0 if itf["avg_rating"] else 0.0,
-            "log_count": float(itf["rating_count_log"]),
+            "avg_rating_norm": avg_rating / 5.0,
+            "avg_rating": avg_rating,
+            "log_count": log_count,
+            "rating_count_log": log_count,
+            "rating_count": int(itf.get("rating_count", 0)),
+            "title": itf.get("title", f"Movie {movie_id}"),
+            "genres": itf.get("genres", []),
+            "popularity_pct": float(itf.get("popularity_pct", 0.0)),
         }
 
     # ------------------------------------------------------------------

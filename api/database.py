@@ -1,76 +1,123 @@
 """
-Database module for the MovieRec API.
+Database module — provides both async and sync database connections.
 
-Provides:
-- Async SQLAlchemy engine + session factory for FastAPI request handling
-- Sync SQLAlchemy engine for scripts that need synchronous DB access
-- get_db() async generator for FastAPI dependency injection
-- get_sync_connection() context manager using psycopg2 for bulk loading scripts
+For local development:
+  - Uses SQLite (data/movierec.db) when DATABASE_URL is not set or set to 'sqlite'
+  - Automatically falls back to SQLite if PostgreSQL is unavailable
+
+For production:
+  - Uses PostgreSQL via DATABASE_URL (Supabase)
+  - Async engine via asyncpg
+
+Environment variables:
+  DATABASE_URL       — async PostgreSQL URL (e.g. postgresql+asyncpg://...)
+  DATABASE_URL_SYNC  — sync PostgreSQL URL  (e.g. postgresql://...)
 """
 
 import os
-from urllib.parse import urlparse
+import sqlite3
+from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
+from loguru import logger
 
-load_dotenv()
+# Load .env from project root
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
-# ---------------------------------------------------------------------------
-# Async engine (for FastAPI request handling via asyncpg)
-# ---------------------------------------------------------------------------
-DATABASE_URL: str = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/movierec",
-)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL_SYNC = os.environ.get("DATABASE_URL_SYNC", "")
 
-async_engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_size=5,
-    max_overflow=10,
-    pool_pre_ping=True,
-)
-
-AsyncSessionLocal = sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
-
-# ---------------------------------------------------------------------------
-# Sync engine (for scripts / migrations that need synchronous access)
-# ---------------------------------------------------------------------------
-DATABASE_URL_SYNC: str = os.getenv(
-    "DATABASE_URL_SYNC",
-    "postgresql://postgres:postgres@localhost:5432/movierec",
-)
-
-sync_engine = create_engine(
-    DATABASE_URL_SYNC,
-    echo=False,
-    pool_size=5,
-    max_overflow=10,
-    pool_pre_ping=True,
-)
+# Default SQLite path for local development
+SQLITE_PATH = str(_PROJECT_ROOT / "data" / "movierec.db")
 
 
-# ---------------------------------------------------------------------------
-# FastAPI dependency injection
-# ---------------------------------------------------------------------------
-async def get_db() -> AsyncSession:
-    """Yield an async SQLAlchemy session for use as a FastAPI dependency.
+# ─── Detect database backend ─────────────────────────────────────────────────
+def _is_postgres() -> bool:
+    """Check if we're configured for PostgreSQL."""
+    return bool(DATABASE_URL) and "postgresql" in DATABASE_URL
 
-    Usage::
 
-        @router.get("/items")
-        async def list_items(db: AsyncSession = Depends(get_db)):
-            result = await db.execute(select(Item))
-            return result.scalars().all()
+# ─── Sync connection (for scripts like load_data.py) ─────────────────────────
+def get_sync_connection():
+    """Return a synchronous database connection.
+
+    Returns a psycopg2 connection for PostgreSQL, or sqlite3 connection for SQLite.
     """
-    async with AsyncSessionLocal() as session:
+    if _is_postgres():
+        try:
+            import psycopg2
+            # Parse the sync URL for psycopg2
+            url = DATABASE_URL_SYNC or DATABASE_URL.replace("+asyncpg", "")
+            conn = psycopg2.connect(url)
+            conn.autocommit = False
+            logger.info(f"Connected to PostgreSQL: {url.split('@')[-1] if '@' in url else 'local'}")
+            return conn
+        except Exception as e:
+            logger.warning(f"PostgreSQL connection failed: {e}. Falling back to SQLite.")
+
+    # SQLite fallback
+    os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
+    conn = sqlite3.connect(SQLITE_PATH)
+    conn.row_factory = sqlite3.Row
+    logger.info(f"Connected to SQLite: {SQLITE_PATH}")
+    return conn
+
+
+def is_sqlite(conn) -> bool:
+    """Check if the connection is SQLite."""
+    return isinstance(conn, sqlite3.Connection)
+
+
+# ─── Async engine (for FastAPI) ──────────────────────────────────────────────
+_async_engine = None
+_AsyncSessionLocal = None
+
+
+def get_async_engine():
+    """Get or create the async SQLAlchemy engine."""
+    global _async_engine
+    if _async_engine is not None:
+        return _async_engine
+
+    if _is_postgres():
+        from sqlalchemy.ext.asyncio import create_async_engine
+        _async_engine = create_async_engine(
+            DATABASE_URL,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            echo=False,
+        )
+        logger.info("Created async PostgreSQL engine")
+    else:
+        from sqlalchemy.ext.asyncio import create_async_engine
+        # Use aiosqlite for async SQLite
+        sqlite_url = f"sqlite+aiosqlite:///{SQLITE_PATH}"
+        _async_engine = create_async_engine(sqlite_url, echo=False)
+        logger.info(f"Created async SQLite engine: {SQLITE_PATH}")
+
+    return _async_engine
+
+
+def get_async_session_factory():
+    """Get or create the async session factory."""
+    global _AsyncSessionLocal
+    if _AsyncSessionLocal is not None:
+        return _AsyncSessionLocal
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    engine = get_async_engine()
+    _AsyncSessionLocal = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    return _AsyncSessionLocal
+
+
+async def get_db():
+    """FastAPI dependency: yield an async database session."""
+    SessionLocal = get_async_session_factory()
+    async with SessionLocal() as session:
         try:
             yield session
             await session.commit()
@@ -79,36 +126,3 @@ async def get_db() -> AsyncSession:
             raise
         finally:
             await session.close()
-
-
-# ---------------------------------------------------------------------------
-# psycopg2 sync connection for bulk loading scripts
-# ---------------------------------------------------------------------------
-def get_sync_connection():
-    """Return a raw psycopg2 connection for bulk-insert scripts.
-
-    Parses ``DATABASE_URL_SYNC`` to extract host/port/dbname/user/password
-    and opens a plain psycopg2 connection (no SQLAlchemy overhead).
-
-    Usage::
-
-        conn = get_sync_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            conn.commit()
-        finally:
-            conn.close()
-    """
-    import psycopg2
-
-    url = DATABASE_URL_SYNC
-    parsed = urlparse(url)
-
-    return psycopg2.connect(
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/") if parsed.path else "movierec",
-        user=parsed.username or "postgres",
-        password=parsed.password or "postgres",
-    )

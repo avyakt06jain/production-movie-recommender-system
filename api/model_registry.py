@@ -148,12 +148,8 @@ class ModelRegistry:
             self.feature_store = FeatureStore()
             return
 
-        with open(features_path, "rb") as f:
-            features_dict: dict = pickle.load(f)
-
         self.feature_store = FeatureStore()
-        self.feature_store.user_features = features_dict.get("user", {})
-        self.feature_store.item_features = features_dict.get("item", {})
+        self.feature_store.load(features_path)
         logger.info(f"Loaded features.pkl ({os.path.getsize(features_path) / 1e6:.1f} MB)")
 
     def _load_two_tower(self, artifacts_dir: str) -> None:
@@ -169,7 +165,11 @@ class ModelRegistry:
         # The checkpoint stores model hyper-params alongside the state dict
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
 
-        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            n_users = checkpoint.get("n_users", self.n_users)
+            n_items = checkpoint.get("n_items", self.n_items)
+            state_dict = checkpoint["model_state_dict"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
             n_users = checkpoint.get("n_users", self.n_users)
             n_items = checkpoint.get("n_items", self.n_items)
             state_dict = checkpoint["state_dict"]
