@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from features.feature_store import (
+from models.feature_store import (
     AGE_BUCKET_MAP,
     GENDER_MAP,
     GENRE_LIST,

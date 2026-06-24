@@ -1,7 +1,7 @@
 """
 FastAPI application — MovieRec API.
 
-Wires together all routers, middleware, and the model-loading lifespan.
+Wires together routes, middleware, and the model-loading lifespan.
 """
 
 import os
@@ -31,23 +31,23 @@ async def lifespan(app: FastAPI):
     """Load all model artifacts into memory on startup."""
     from api.model_registry import ModelRegistry
 
-    logger.info("🚀 Starting MovieRec API — loading model artifacts…")
+    logger.info("Starting MovieRec API — loading model artifacts…")
 
     registry = ModelRegistry()
     registry.load_all()
     app.state.registry = registry
 
     logger.info(
-        f"✅ Startup complete — "
-        f"TwoTower={'✓' if registry.two_tower else '✗'}  "
-        f"Ranker={'✓' if registry.ranker else '✗'}  "
-        f"FAISS={'✓' if registry.faiss_index else '✗'}  "
-        f"FeatureStore={'✓' if registry.feature_store else '✗'}"
+        f"Startup complete — "
+        f"TwoTower={'OK' if registry.two_tower else 'X'}  "
+        f"Ranker={'OK' if registry.ranker else 'X'}  "
+        f"FAISS={'OK' if registry.faiss_index else 'X'}  "
+        f"FeatureStore={'OK' if registry.feature_store else 'X'}"
     )
 
     yield  # application runs here
 
-    logger.info("👋 Shutting down MovieRec API")
+    logger.info("Shutting down MovieRec API")
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +71,9 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Routers
+# Routes
 # ---------------------------------------------------------------------------
-from api.routers import feedback, health, recommend, similar  # noqa: E402
+from api.routes import api_router, health_router  # noqa: E402
 
-app.include_router(recommend.router, prefix="/api/v1")
-app.include_router(similar.router, prefix="/api/v1")
-app.include_router(feedback.router, prefix="/api/v1")
-app.include_router(health.router)  # health lives at /health (no prefix)
+app.include_router(api_router)
+app.include_router(health_router)

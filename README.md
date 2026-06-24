@@ -1,19 +1,18 @@
-# MovieRec: Production-Grade Recommender System
+# MovieRec: Machine Learning Recommender System
 
-A full-stack, production-ready machine learning recommendation system built to serve personalized movie suggestions. It leverages a **3-stage ranking funnel** (Candidate Generation → Ranking → Re-ranking) typically used by enterprise systems like YouTube and Netflix, prioritizing high relevance, diversity, and sub-100ms latency.
+A machine learning recommendation system built to serve personalized movie suggestions. It leverages a **3-stage ranking funnel** (Candidate Generation → Ranking → Re-ranking) to prioritize high relevance and diversity.
 
 ---
 
 ## What is this?
-This project is an end-to-end Machine Learning pipeline and web application trained on the **MovieLens 1M** dataset. It is not just a notebook—it features an asynchronous **FastAPI backend**, a **Streamlit frontend**, and integrates with managed cloud services to handle data storage, model registry, and high-speed caching.
+This project is an end-to-end Machine Learning pipeline and web application trained on the **MovieLens 1M** dataset. It features an asynchronous **FastAPI backend** and a **Streamlit frontend**, integrating with PostgreSQL for data storage, Hugging Face for model loading, and Redis for caching.
 
 ### Key Features
 - **Two-Tower Neural Network**: PyTorch-based model for generating 64-dimensional user and item embeddings.
-- **Approximate Nearest Neighbors (ANN)**: Ultra-fast candidate generation over 3,700+ movies using **FAISS**.
-- **LightGBM Ranker**: State-of-the-art tree-boosting algorithm (LambdaRank) evaluating 49 dynamic features per user-item pair.
-- **MMR Diversity Re-ranking**: Ensures recommendations don't fall into a "filter bubble" by maximizing genre diversity.
-- **Serverless Redis Caching**: Sub-100ms API latency via Upstash.
-- **Hugging Face Model Registry**: Automated artifact downloading directly from the HF Hub.
+- **Approximate Nearest Neighbors (ANN)**: Fast candidate generation over 3,700+ movies using **FAISS**.
+- **LightGBM Ranker**: Tree-boosting algorithm (LambdaRank) evaluating dynamic features per user-item pair.
+- **MMR Diversity Re-ranking**: Ensures recommendations maximize genre diversity.
+- **Redis Caching**: Caches API responses to speed up load times.
 
 ---
 
@@ -23,14 +22,14 @@ This project is an end-to-end Machine Learning pipeline and web application trai
 
 ### Core Components
 
-1. **Frontend (Streamlit)**: A lightweight, interactive web application that provides the user interface for browsing movies, adjusting preferences (like diversity and top-N), and receiving real-time personalized recommendations.
-2. **API Layer (FastAPI)**: A high-performance asynchronous backend that manages the routing, coordinates the ML funnel, and communicates with the database and cache.
-3. **Caching (Upstash Redis)**: A serverless Redis instance used to cache API responses and item-item similarity vectors. It reduces latency for repeated queries to under 100ms.
-4. **Candidate Generation (Two-Tower & FAISS)**: The first stage of the ML pipeline. It uses PyTorch-based embeddings to quickly narrow down the entire catalog of movies to the top 200 candidates via an Approximate Nearest Neighbor (ANN) search.
-5. **Scoring & Ranking (LightGBM)**: The second stage of the pipeline. A highly optimized LambdaRank boosting model that computes a precise relevancy score for each of the top 200 candidates using 49 dynamic features.
-6. **Diversity Re-ranking (MMR)**: The final stage of the pipeline. It applies Maximal Marginal Relevance to ensure the final top-10 list is not only highly relevant but also diverse across genres to avoid the "filter bubble."
-7. **Database (Supabase PostgreSQL)**: Stores the core metadata, including user profiles, movie information, and historical interactions (ratings and feedback).
-8. **Model Registry (Hugging Face Hub)**: Acts as the central repository for the trained machine learning models. The API downloads the latest models (`two_tower.pt`, `lgbm_ranker.txt`, etc.) directly from the Hub on startup.
+1. **Frontend (Streamlit)**: A clean, interactive web dashboard for browsing movies, adjusting preferences, and receiving personalized recommendations.
+2. **API Layer (FastAPI)**: The backend that coordinates the ML funnel and handles database/cache communication.
+3. **Caching (Redis)**: Caches API responses and item-item similarity vectors.
+4. **Candidate Generation (Two-Tower & FAISS)**: Uses PyTorch embeddings to narrow down the catalog to the top 200 candidates via an Approximate Nearest Neighbor search.
+5. **Scoring & Ranking (LightGBM)**: A LambdaRank model that computes a precise relevancy score for each candidate.
+6. **Diversity Re-ranking (MMR)**: Applies Maximal Marginal Relevance to ensure the final top-10 list is diverse.
+7. **Database (PostgreSQL)**: Stores metadata, user profiles, and ratings.
+8. **Model Registry (Hugging Face Hub)**: The API downloads the trained models directly from the Hub on startup.
 
 ---
 
@@ -39,22 +38,16 @@ This project is an end-to-end Machine Learning pipeline and web application trai
 | Category | Technologies |
 |---|---|
 | **Machine Learning** | PyTorch, LightGBM, FAISS, Scikit-Learn |
-| **Backend & API** | Python 3.11, FastAPI, Uvicorn, Pydantic |
-| **Database & ORM** | PostgreSQL (Supabase), SQLAlchemy, asyncpg |
-| **Caching** | Redis (Upstash) |
-| **Model Registry** | Hugging Face Hub |
+| **Backend & API** | Python 3.11, FastAPI, Uvicorn |
+| **Database** | PostgreSQL, SQLAlchemy |
+| **Caching** | Redis |
 | **Frontend** | Streamlit |
-| **Deployment** | Docker, Render *(Ready)* |
 
 ---
 
 ## Performance & Stats
-- **Data Scale**: Handled 1,000,209 interactions, 6,040 users, and 3,706 movies.
-- **Latency Optimization**: 
-  - *Cache Miss*: ~1.04 seconds (Running the full 3-stage funnel).
-  - *Cache Hit*: **< 99 milliseconds** (via Upstash Redis).
-- **Ranking Accuracy**: LightGBM achieves an **NDCG@10 approaching ~0.99** on offline holdout validation sets.
-- **Scalability**: Batched database seeding (`execute_values`) efficiently upserted 1M rows into Supabase in under a minute.
+- **Data Scale**: Trained on 1,000,209 interactions, 6,040 users, and 3,706 movies.
+- **Ranking Accuracy**: LightGBM achieves an **NDCG@10 approaching ~0.99** on offline validation sets.
 
 ---
 
@@ -63,30 +56,27 @@ This project is an end-to-end Machine Learning pipeline and web application trai
 ```text
 recommendation-system/
 ├── api/                     # FastAPI backend
-│   ├── routers/             # Endpoint definitions (recommend, similar, feedback)
-│   ├── cache.py             # Upstash Redis integration
-│   ├── database.py          # SQLAlchemy async & sync setup
+│   ├── cache.py             # Redis integration
+│   ├── database.py          # SQLAlchemy setup
 │   ├── model_registry.py    # HF Hub downloader & memory loader
+│   ├── routes.py            # API endpoints (recommend, similar, feedback)
 │   └── main.py              # Application entrypoint
-├── features/                # Feature engineering modules
-│   └── feature_store.py     # 49-dim vector builder & metadata store
 ├── frontend/                # Streamlit UI
 │   └── app.py               # Main dashboard
-├── models/                  # ML architectures
+├── models/                  # ML architectures & data structures
 │   ├── two_tower.py         # PyTorch User & Item Embeddings
-│   └── ranker.py            # LightGBM LambdaRank integration
-├── pipeline/                # The 3-stage ML funnel
-│   ├── candidate_generator.py 
-│   ├── ranker_pipeline.py
-│   └── reranker.py          # MMR logic
-├── retrieval/               # Vector search
-│   └── faiss_index.py       # FAISS indexing
-├── scripts/                 # ETL and utility scripts
-│   ├── load_data.py         # DB migration
+│   ├── ranker.py            # LightGBM LambdaRank integration
+│   ├── feature_store.py     # Feature engineering & metadata store
+│   └── faiss_index.py       # FAISS indexing logic
+├── scripts/                 # Utility scripts
+│   ├── load_data.py         # DB migration and data loader
 │   ├── precompute_features.py 
-│   └── upload_artifacts.py  # Hugging Face deployment
+│   └── upload_artifacts.py  # Hugging Face deployment script
 ├── training/                # Training loops & dataset definitions
-└── requirements.txt         # Pinned Python dependencies
+│   ├── dataset.py
+│   ├── train_ranker.py
+│   └── train_two_tower.py
+└── requirements.txt         # Python dependencies
 ```
 
 ---
@@ -104,7 +94,14 @@ pip install -r requirements.txt
 ```
 
 ### 2. Environment Setup
-Create a `.env` file based on `.env.example` and add your cloud credentials for Supabase, Upstash, and Hugging Face.
+Create a `.env` file in the root directory and add your credentials:
+```env
+REDIS_URL="redis://localhost:6379/0"
+DATABASE_URL="postgresql+asyncpg://user:pass@localhost:5432/db"
+DATABASE_URL_SYNC="postgresql://user:pass@localhost:5432/db"
+HF_REPO_ID="your-username/recommender-system"
+HF_TOKEN="your_hf_token"
+```
 
 ### 3. Start the Backend (FastAPI)
 The server will automatically download the required ML artifacts from Hugging Face on startup.
@@ -119,8 +116,4 @@ In a new terminal window:
 ```bash
 streamlit run frontend/app.py
 ```
-Open `http://localhost:8501` to view your personalized movie recommendations!
-
----
-
-*Designed and developed to showcase modern, highly-scalable Machine Learning Engineering practices.*
+Open `http://localhost:8501` to view the UI.

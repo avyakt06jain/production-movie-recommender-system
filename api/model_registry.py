@@ -23,9 +23,9 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from features.feature_store import FeatureStore  # noqa: E402
+from models.feature_store import FeatureStore  # noqa: E402
 from models.two_tower import TwoTowerModel  # noqa: E402
-from retrieval.faiss_index import FAISSItemIndex  # noqa: E402
+from models.faiss_index import FAISSItemIndex  # noqa: E402
 
 # Canonical list of the 18 MovieLens genres
 GENRES: list[str] = [
